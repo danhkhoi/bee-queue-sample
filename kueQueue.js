@@ -1,5 +1,3 @@
-//Concurrent Queue
-
 import kue from 'kue';
 import util from 'util';
 
@@ -18,31 +16,59 @@ const defaultRedisConfig = {
     }
 };
 
-const queueArray = [];
 
-const initQueue = (numQueue = DEFAULT_NUM_QUEUE, task) => {
+const initQueueList = ({
+    numQueue = DEFAULT_NUM_QUEUE,
+    task,
+    config
+} = {}) => {
 
-    for(let i = 0; i ++ ; i < DEFAULT_NUM_QUEUE) {
-        const newQueue = kue.createQueue();
+    const queueArray = [];
+
+    for (let i = 0;i < numQueue; i++) {
         const queueConfig = {
             prefix: `bq_q_${i}`,
-            redis: defaultRedisConfig,
+            redis: config || { ...defaultRedisConfig, db: i}, //NECHANGE
         }
-        queueArray.push(newQueue);
+
+        const queue = kue.createQueue(queueConfig);
+        queue.watchStuckJobs() //default to 1000ms
+        queue.process(SEND_TX_JOB, function (job, done) {
+
+            console.log('queue process', job.id, job.data);
+
+            testFunc().then(() => { //task
+                //done(new Error('error gi do'));
+                console.log('done job', job.id);
+                done();
+            }).catch(error => {
+                console.log('error in queue', error);
+                done(error);
+            });
+        });
+
+        queueArray.push(queue);
     }
+
+    return queueArray;
 };
 
-const leastJobQueue = async () => {
+const leastJobQueue = async (queueArray) => {
+
+    return queueArray[Math.floor(Math.random() * 5)]
     let queueIndex = 0;
     let currentInActiveCount = undefined;
     let i = 0;
-    while( i < queueArray.length) {
+
+    while (i < queueArray.length) {
         try {
             const inactiveCount = await getInactiveCount(queueArray[i]);
 
-            if(inactiveCount === 0) {
+            if (inactiveCount === 0) {
+                console.log('got queue ', queueIndex);
                 return queueArray[i];
             }
+
             if (inactiveCount < currentInActiveCount || currentInActiveCount) {
                 currentInActiveCount = inactiveCount;
                 queueIndex = i;
@@ -52,6 +78,7 @@ const leastJobQueue = async () => {
         }
         i++;
     }
+    console.log('got queue ', queueIndex);
     return queueArray[queueIndex];
 };
 
@@ -63,48 +90,28 @@ function testFunc(time = 1000) {
     });
 }
 
-let queue;
+const createJob = async ({jobParams, queueArray} = {}) => {
 
-try {
-    queue = kue.createQueue(defaultQueueConfig);
-   
-    queue.watchStuckJobs() //default to 1000ms
-
-    queue.process(SEND_TX_JOB, function (job, done) {
-       
-        console.log('queue process', job.id, job.data);
-        testFunc().then(() => {
-            //done(new Error('error gi do'));
-            console.log('done job', job.id);
-            done();
+    const enqueueJob = await leastJobQueue(queueArray);
+    //console.log('new job', jobParams);
+    enqueueJob.create(SEND_TX_JOB, jobParams)
+        .attempts(ATTEMP_NUMBER)
+        .ttl(TIME_TO_LIVE)
+        .save(function (err) {
+            if (!err) console.log('created new job');
         });
-    });
-} catch (error) {
-    console.log('error queue', error)
-}
-
-const createJob = (params = {}) => {
-    queue && queue.create(SEND_TX_JOB, params)
-    .attempts(ATTEMP_NUMBER)
-    .ttl(TIME_TO_LIVE)
-    .save(function (err) {
-        if (!err) console.log('created new job');
-    });
 };
-
-
-const getQueue = () => queue;
 
 const getInactiveCount = async (queue) => {
 
     if (queue) {
         return util.promisify(queue.inactiveCount).bind(queue)();
     }
-    return Promise.reject('Error queue');    
+    return Promise.reject('Error queue');
 };
 
 export default {
     createJob,
-    getQueue,
     getInactiveCount,
+    initQueueList,
 };
